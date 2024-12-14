@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+py-cord[voice]
+openai
+Pillow
+jinja2
+python-multipart
+python-dotenv
+numpy
