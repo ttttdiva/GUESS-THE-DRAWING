@@ -2,7 +2,6 @@
 import asyncio
 import base64
 import os
-import random
 import time
 import uuid
 from io import BytesIO
@@ -20,8 +19,8 @@ from fastapi import FastAPI, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from game_logic import (analyze_ai_answer, judge_winner, record_answer,
-                        start_game, submit_final_image)
+from game_logic import (analyze_ai_answer_async, analyze_image, judge_winner,
+                        record_answer, start_game, submit_final_image)
 from PIL import Image
 
 load_dotenv(find_dotenv())
@@ -50,7 +49,7 @@ async def time_left(game_id: str):
     if not start_time:
         return {"time_left": 0}
     elapsed = time.time() - start_time
-    remaining = 60 - int(elapsed)
+    remaining = 120 - int(elapsed)
     if remaining < 0:
         remaining = 0
     return {"time_left": remaining}
@@ -64,10 +63,10 @@ async def submit_image(game_id: str = Form(...), img_data: str = Form(...)):
     save_path = f"../web/static/{filename}"
     img.save(save_path)
 
-    # Web上のURL（用途によっては不要になるが一応残す）
-    image_url = f"http://localhost:8000/static/{filename}"
-    # set_final_imageにローカルパスも渡す
-    set_final_image(game_id, image_url, save_path)
+    # Web上のURL
+    image_url = f"http://localhost:10096/static/{filename}"
+    # set_final_imageにURLを渡す
+    set_final_image(game_id, image_url)
 
     GAMES[game_id]["final_image_submitted"] = True
 
@@ -143,10 +142,13 @@ async def create_blank_image():
     save_path = f"../web/static/{filename}"
     with open(save_path, 'wb') as f:
         f.write(buf.read())
-    return f"http://localhost:8000/static/{filename}"
+    # ローカルパスはsave_path
+    # ここでimage_urlも生成（もし必要なら）
+    image_url = f"http://localhost:10096/static/{filename}"
+    return image_url, save_path
 
 async def schedule_judgement(game_id: str):
-    await asyncio.sleep(60)  # 60秒待機
+    await asyncio.sleep(120)  # 60秒待機
     if not GAMES[game_id]["judgement_done"]:
         if not GAMES[game_id]["final_image_submitted"]:
             blank_url = await create_blank_image()
@@ -154,18 +156,33 @@ async def schedule_judgement(game_id: str):
         await do_judgement(game_id)
         GAMES[game_id]["judgement_done"] = True
 
+def analyze_ai_answer_sync(game_id: str):
+    # 同期的なOpenAI API呼び出しをここで実行
+    image_url = get_final_image_url(game_id)
+    ai_guess = analyze_image(image_url)
+    set_ai_answer(game_id, ai_guess)
+
+async def analyze_ai_answer_async(game_id: str):
+    # 非同期で同期関数をスレッド実行
+    await asyncio.to_thread(analyze_ai_answer_sync, game_id)
+
 async def do_judgement(game_id: str):
-    analyze_ai_answer(game_id)
-    # judge_winnerでwinner, chosen(人間側最多回答), topic(正解)を受け取る
+    # 一度イベントループに戻して他のI/Oを処理させる
+    await asyncio.sleep(0)
+
+    # OpenAI API呼び出しを別スレッドで実行し、イベントループをブロックしない
+    await analyze_ai_answer_async(game_id)
+
+    # judge_winnerでwinner, chosen, topic取得
     winner, chosen, topic = judge_winner(game_id)
     final_url = get_final_image_url(game_id)
     ai_ans = get_ai_answer(game_id)  # AIが推測した回答を取得
 
     print("結果発表！")
     print(f"最終画像: {final_url}")
-    print(f"正解: {topic}")               # 正解を表示
-    print(f"人間の最多回答: {chosen}")   # 人間の回答を表示
-    print(f"AIの回答: {ai_ans}")         # AI回答を表示
+    print(f"正解: {topic}")
+    print(f"人間の最多回答: {chosen}")
+    print(f"AIの回答: {ai_ans}")
     print(f"勝者は... { '人間チーム' if winner=='HUMAN' else 'AI'} です！")
 
     ctx = GAMES[game_id].get("ctx")
@@ -211,17 +228,21 @@ async def start_game_cmd(ctx: discord.ApplicationContext):
 async def answer_cmd(ctx: discord.ApplicationContext, answer: str):
     global current_game_id
     if current_game_id is None:
-        await ctx.respond("ゲームが開始されていません")
+        # インタラクションが有効な間に応答するため、即時応答
+        await ctx.respond("ゲームが開始されていません", ephemeral=True)
         return
     # 常に回答フェーズにするため、ここでget_stateを確認する必要がなくなりますが、
     # 念のため"ANSWERING"であることを前提とします。
     # 仮に他でstateを操作する場合に備え、チェックを残す場合はこうします。
     st = get_state(current_game_id)
-    # 60秒経過かend_game呼ぶまではANSWERINGにするようにしたので、ほぼ必ずANSWERING
     if st != "ANSWERING":
+        # 即座にrespondできる場合はrespondを使う
         await ctx.respond("今は回答フェーズではありません")
         return
     record_answer(current_game_id, ctx.author.id, answer)
+
+    # ここで応答が遅れている場合、すでにdeferしていたらfollowup.sendを使用
+    # そうでなければrespondで問題ありません。
     await ctx.respond(f"{ctx.author.name} の回答: {answer} を受け付けました")
 
 @bot.slash_command(name="end_game", description="ゲームを終了し結果を表示します。")
@@ -230,24 +251,26 @@ async def end_game_cmd(ctx: discord.ApplicationContext):
     if current_game_id is None:
         await ctx.respond("ゲームが開始されていません")
         return
-    
-    # 最初にデファーしておく
+
+    # ここでdeferしておくと、このコマンドの最初のレスポンスを後でfollowupで送れる
     await ctx.defer()
 
     set_state(current_game_id, "RESULT")
     if not GAMES[current_game_id]["judgement_done"]:
         if not GAMES[current_game_id]["final_image_submitted"]:
-            blank_url = await create_blank_image()
+            blank_url, blank_local_path = await create_blank_image()
             submit_final_image(current_game_id, blank_url)
         await do_judgement(current_game_id)
         GAMES[current_game_id]["judgement_done"] = True
 
-    # ここでは respond は使わず followup で回答
+    # 最後のメッセージはrespondではなく、followup.sendを使用
     await ctx.followup.send("結果発表を行いました！")
 
 
+
+
 async def main():
-    config = uvicorn.Config(app, host="0.0.0.0", port=8000, log_level="info")
+    config = uvicorn.Config(app, host="0.0.0.0", port=10096, log_level="info")
     server = uvicorn.Server(config)
     await asyncio.gather(
         server.serve(),

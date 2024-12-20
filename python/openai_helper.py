@@ -1,5 +1,4 @@
 # openai_helper.py
-import base64
 import os
 
 from dotenv import find_dotenv, load_dotenv
@@ -11,32 +10,34 @@ from openai import OpenAI
 api_key = os.environ['OPENAI_API_KEY']
 
 # OpenAIクライアントの初期化
-client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
+client = OpenAI(api_key=api_key)
 
-def analyze_image(local_path: str) -> str:
-    # ローカル画像ファイルを読み込んでBase64エンコード
+def analyze_image(url: str) -> str:
     try:
-        with open(local_path, "rb") as f:
-            img_data = base64.b64encode(f.read()).decode("utf-8")
-
-        # Base64データをユーザーメッセージとしてChat APIに送る
-        prompt = (
-            "この画像が何を描いているか、一語で表してください。\n\n"
-            f"{img_data}"
-        )
-
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
+        print(f"画像URL: {url}")
+        # ユーザ提供のサンプルコードと同様の形式でAPIコール
+        response = client.chat.completions.create(
+            model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are an assistant that identifies what is depicted in an image from base64 data."},
-                {"role": "user", "content": prompt}
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "この落書きが何を描いているか推測し、一単語で表してください。"},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": url
+                            }
+                        }
+                    ],
+                }
             ],
-            temperature=0
+            max_tokens=300,
         )
-
-        description = completion.choices[0].message.content
-        # 一語だけ抽出（必要なら前処理）
-        return description
+        
+        # レスポンスから回答テキストを取得
+        print(f"画像URL: {response.choices[0].message.content.strip()}")
+        return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"Error analyzing image: {e}")
         return "不明"
@@ -47,7 +48,7 @@ def check_answer_via_chat(answer: str, topic: str) -> bool:
     """
     try:
         completion = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant that determines if two answers refer to the same well-known entity."},
                 {"role": "user", "content": f"Correct answer: '{topic}'\nUser answer: '{answer}'\nAre they essentially the same thing? Reply ONLY 'YES' or 'NO'."}

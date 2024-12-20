@@ -16,8 +16,8 @@ def create_game(drawer_id: int, topic: str) -> str:
         "state": "DRAWING",
         "answers": [],
         "ai_answer": None,
-        "viewer_url": f"http://localhost:8000/viewer/{game_id}",
-        "drawer_url": f"http://localhost:8000/drawer/{game_id}",
+        "viewer_url": f"http://localhost:10096/viewer/{game_id}",
+        "drawer_url": f"http://localhost:10096/drawer/{game_id}",
         "final_image_url": None
     }
     return game_id
@@ -29,12 +29,11 @@ def add_player(game_id: str, player_id: int):
 def add_answer(game_id: str, player_id: int, answer: str):
     GAMES[game_id]["answers"].append((player_id, answer))
 
-def set_final_image(game_id: str, url: str, local_path: str):
+def set_final_image(game_id: str, url: str):
     GAMES[game_id]["final_image_url"] = url
-    GAMES[game_id]["final_image_path"] = local_path
 
 def get_final_image_path(game_id: str):
-    return GAMES[game_id].get("final_image_path")
+    return GAMES[game_id].get("final_image_url")
 
 def set_state(game_id: str, state: str):
     GAMES[game_id]["state"] = state
